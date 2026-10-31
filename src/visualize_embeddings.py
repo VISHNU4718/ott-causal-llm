@@ -1,6 +1,8 @@
 """
 visualize_embeddings.py
 ------------------------
+Run:  python -m src.visualize_embeddings
+
 Projects the transformer's learned user embeddings into 2D with t-SNE and
 colors by the LATENT engagement_type (dormant/casual/core) - a label the
 model never saw during training. If the embeddings cluster by this label,
@@ -9,16 +11,26 @@ representation purely from watch sequences, not just memorized noise.
 """
 
 import os
+
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "outputs")
 
 
+def compute_tsne(embs, seed=42):
+    perplexity = min(40, max(2, (len(embs) - 1) // 3))
+    return TSNE(n_components=2, perplexity=perplexity, random_state=seed, init="pca").fit_transform(embs)
+
+
 def main():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     embs = np.load(os.path.join(DATA_DIR, "user_embeddings.npy"))
     emb_ids = np.load(os.path.join(DATA_DIR, "user_embedding_ids.npy"))
     users = pd.read_csv(os.path.join(DATA_DIR, "users.csv"))
@@ -27,7 +39,7 @@ def main():
     emb_df = emb_df.merge(users[["user_id", "engagement_type"]], on="user_id", how="left")
 
     print("Running t-SNE (this takes a minute for 4000 points)...")
-    coords = TSNE(n_components=2, perplexity=40, random_state=42, init="pca").fit_transform(embs)
+    coords = compute_tsne(embs)
 
     fig, ax = plt.subplots(figsize=(7, 6))
     colors = {"dormant": "#d97757", "casual": "#e8c07d", "core": "#7fa8a3"}

@@ -1,38 +1,50 @@
 """
 causal_uplift.py
 ------------------
-This is the "causal inference to identify effective interventions" piece of
-the JD. Because assignment to the intervention (personalized recommendation
-push) was randomized (RCT-style) in generate_data.py, we can validate our
-uplift model against a KNOWN ground-truth treatment effect - this is the
-standard way causal ML papers validate their methods on semi-synthetic data
-(e.g. as done in the Uplift Modeling / CausalML literature).
+Heterogeneous treatment-effect (uplift) estimation on the learned user embeddings.
 
-We implement two standard estimators:
-  - T-Learner: train two separate outcome models (treated vs control), take
-    the difference in predicted outcomes as the estimated uplift.
-  - X-Learner (Kunzel et al. 2019): improves on T-learner in settings with
-    imbalanced treatment groups or heterogeneous effect sizes, by
-    cross-imputing individual treatment effects and using a propensity-
-    weighted combination.
+Assignment to the intervention (a personalised recommendation push) was randomised
+in generate_data.py, and the simulation records the true per-user effect, so the
+estimates can be scored against ground truth on held-out users. That is the usual
+way uplift methods are validated on semi-synthetic data.
 
-Covariates: the transformer's learned user embeddings (behavioral signal)
-concatenated with engagement_type as a sanity-check feature is intentionally
-EXCLUDED from the model inputs - the whole point is to see whether the model
-can recover the latent segments purely from behavior embeddings, the way a
-real system would have to (you don't get to observe "engagement_type" in
-production, only behavior).
+Estimators:
+  - T-Learner: separate outcome models for treated and control; uplift is the
+    difference in predicted outcomes.
+  - X-Learner (Kunzel et al. 2019): imputes individual effects from the other
+    arm's model, fits effect models on them, and combines the two. With a 50/50
+    randomised assignment the combination weights are 0.5 / 0.5.
+
+The covariates are the embeddings only. engagement_type is never a model input.
+As a reference point, the same X-Learner is also run on a few hand-built
+features of the watch history (length, genre mix, genre concentration).
+
+Run:  python -m src.causal_uplift
 """
 
+import json
 import os
+
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.model_selection import train_test_split
-import matplotlib.pyplot as plt
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "outputs")
+
+
+def baseline_features(df, sequences, shows):
+    """Hand-built history features: log length, mean genre mix of watched shows, genre entropy."""
+    genre = shows[[c for c in shows.columns if c.startswith("genre_")]].values
+    by_user = {e["user_id"]: e["sequence"] for e in sequences}
+    rows = []
+    for uid in df["user_id"]:
+        seq = by_user[int(uid)]
+        mix = genre[seq].mean(axis=0)
+        entropy = -(mix * np.log(mix + 1e-12)).sum()
+        rows.append(np.concatenate([[np.log(len(seq))], mix, [entropy]]))
+    return np.array(rows)
 
 
 def load_data():
@@ -46,9 +58,13 @@ def load_data():
     return merged
 
 
+def _gbr():
+    return GradientBoostingRegressor(n_estimators=150, max_depth=3, learning_rate=0.05, random_state=0)
+
+
 def t_learner(X_train, t_train, y_train, X_eval):
-    model_treated = GradientBoostingRegressor(n_estimators=150, max_depth=3, learning_rate=0.05)
-    model_control = GradientBoostingRegressor(n_estimators=150, max_depth=3, learning_rate=0.05)
+    model_treated = _gbr()
+    model_control = _gbr()
 
     model_treated.fit(X_train[t_train == 1], y_train[t_train == 1])
     model_control.fit(X_train[t_train == 0], y_train[t_train == 0])
@@ -68,8 +84,8 @@ def x_learner(X_train, t_train, y_train, X_eval):
     d_treated = y_train[treated_mask] - model_control.predict(X_train[treated_mask])
     d_control = model_treated.predict(X_train[control_mask]) - y_train[control_mask]
 
-    model_tau_treated = GradientBoostingRegressor(n_estimators=150, max_depth=3, learning_rate=0.05)
-    model_tau_control = GradientBoostingRegressor(n_estimators=150, max_depth=3, learning_rate=0.05)
+    model_tau_treated = _gbr()
+    model_tau_control = _gbr()
     model_tau_treated.fit(X_train[treated_mask], d_treated)
     model_tau_control.fit(X_train[control_mask], d_control)
 
@@ -80,49 +96,44 @@ def x_learner(X_train, t_train, y_train, X_eval):
     return uplift
 
 
-def evaluate_uplift(df, predicted_uplift, model_name):
+def evaluate_uplift(df, predicted_uplift, model_name, verbose=True):
+    """Correlation with the true effect, plus mean TRUE effect per predicted-uplift decile (top -> bottom)."""
     df = df.copy()
-    df["predicted_uplift"] = predicted_uplift
+    df["predicted_uplift"] = np.asarray(predicted_uplift)
+    corr = float(np.corrcoef(df["predicted_uplift"], df["true_treatment_effect"])[0, 1])
 
-    # Correlation with ground truth (available because we simulated it)
-    corr = np.corrcoef(df["predicted_uplift"], df["true_treatment_effect"])[0, 1]
-
-    # Qini-style decile analysis: sort by predicted uplift, check if top decile
-    # really does have higher TRUE treatment effect than bottom decile
     df_sorted = df.sort_values("predicted_uplift", ascending=False).reset_index(drop=True)
-    n = len(df_sorted)
-    decile_size = n // 10
-    decile_true_effects = [
-        df_sorted.iloc[i * decile_size:(i + 1) * decile_size]["true_treatment_effect"].mean()
+    decile_size = len(df_sorted) // 10
+    deciles = [
+        float(df_sorted.iloc[i * decile_size : (i + 1) * decile_size]["true_treatment_effect"].mean())
         for i in range(10)
     ]
+    if verbose:
+        print(f"\n=== {model_name} ===")
+        print(f"Correlation(predicted uplift, true treatment effect): {corr:.3f}")
+        print("Mean TRUE treatment effect by predicted-uplift decile (top -> bottom):")
+        for i, val in enumerate(deciles):
+            print(f"  Decile {i + 1}: {val:.3f}")
+    return corr, deciles
 
-    print(f"\n=== {model_name} ===")
-    print(f"Correlation(predicted uplift, true treatment effect): {corr:.3f}")
-    print("Mean TRUE treatment effect by predicted-uplift decile (top -> bottom):")
-    for i, val in enumerate(decile_true_effects):
-        print(f"  Decile {i+1}: {val:.3f}")
 
-    return corr, decile_true_effects
+def plot_results(results, true_effect_by_segment, out_path):
+    import matplotlib
 
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-def plot_results(results, out_path):
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-
     for name, (corr, deciles) in results.items():
         axes[0].plot(range(1, 11), deciles, marker="o", label=f"{name} (r={corr:.2f})")
     axes[0].set_xlabel("Predicted-uplift decile (1=highest predicted uplift)")
     axes[0].set_ylabel("Mean TRUE treatment effect")
-    axes[0].set_title("Uplift model validation vs ground truth")
+    axes[0].set_title("Uplift model validation vs ground truth (held-out users)")
     axes[0].axhline(0, color="gray", linestyle="--", linewidth=0.8)
     axes[0].legend()
 
-    # Bar chart: baseline retention & true effect by engagement type (context chart)
-    seg_summary = pd.DataFrame({
-        "engagement_type": ["dormant", "casual", "core"],
-        "true_effect": [0.35, 0.12, -0.02],
-    })
-    axes[1].bar(seg_summary["engagement_type"], seg_summary["true_effect"], color=["#d97757", "#e8c07d", "#7fa8a3"])
+    segs = ["dormant", "casual", "core"]
+    axes[1].bar(segs, [true_effect_by_segment[k] for k in segs], color=["#d97757", "#e8c07d", "#7fa8a3"])
     axes[1].set_title("Ground-truth intervention effect by latent user segment")
     axes[1].set_ylabel("True treatment effect on 30-day retention")
     axes[1].axhline(0, color="gray", linestyle="--", linewidth=0.8)
@@ -130,39 +141,55 @@ def plot_results(results, out_path):
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, dpi=150)
+    plt.close(fig)
     print(f"\nSaved plot to {out_path}")
+
+
+def run(df, X, X_baseline, seed=42):
+    """Fit both learners on a 70% split; return held-out frame with predictions and the metrics."""
+    t = df["treatment"].values
+    y = df["retained_30d"].values
+    idx_train, idx_eval = train_test_split(np.arange(len(df)), test_size=0.3, random_state=seed)
+    df_eval = df.iloc[idx_eval].reset_index(drop=True)
+
+    uplift_t, _, _ = t_learner(X[idx_train], t[idx_train], y[idx_train], X[idx_eval])
+    uplift_x = x_learner(X[idx_train], t[idx_train], y[idx_train], X[idx_eval])
+    uplift_b = x_learner(X_baseline[idx_train], t[idx_train], y[idx_train], X_baseline[idx_eval])
+    df_eval["predicted_uplift_tlearner"] = uplift_t
+    df_eval["predicted_uplift_xlearner"] = uplift_x
+    df_eval["predicted_uplift_baseline"] = uplift_b
+
+    results = {
+        "T-Learner": evaluate_uplift(df_eval, uplift_t, "T-Learner"),
+        "X-Learner": evaluate_uplift(df_eval, uplift_x, "X-Learner"),
+        "X-Learner on hand-built features": evaluate_uplift(df_eval, uplift_b, "X-Learner on hand-built features"),
+    }
+    return df_eval, results
 
 
 def main():
     df = load_data()
     emb_cols = [c for c in df.columns if c.startswith("emb_")]
+    with open(os.path.join(DATA_DIR, "watch_sequences.json")) as f:
+        sequences = json.load(f)
+    shows = pd.read_csv(os.path.join(DATA_DIR, "shows.csv"))
 
-    X = df[emb_cols].values
-    t = df["treatment"].values
-    y = df["retained_30d"].values
+    df_eval, results = run(df, df[emb_cols].values, baseline_features(df, sequences, shows))
 
-    idx_train, idx_eval = train_test_split(np.arange(len(df)), test_size=0.3, random_state=42)
-    X_train, t_train, y_train = X[idx_train], t[idx_train], y[idx_train]
-    X_eval = X[idx_eval]
-    df_eval = df.iloc[idx_eval].reset_index(drop=True)
+    seg_effect = df.groupby("engagement_type")["true_treatment_effect"].first().to_dict()
+    plot_results(
+        {k: v for k, v in results.items() if k != "X-Learner on hand-built features"},
+        seg_effect,
+        os.path.join(OUT_DIR, "uplift_validation.png"),
+    )
 
-    results = {}
-
-    uplift_t, _, _ = t_learner(X_train, t_train, y_train, X_eval)
-    results["T-Learner"] = evaluate_uplift(df_eval, uplift_t, "T-Learner")
-
-    uplift_x = x_learner(X_train, t_train, y_train, X_eval)
-    results["X-Learner"] = evaluate_uplift(df_eval, uplift_x, "X-Learner")
-
-    plot_results(results, os.path.join(OUT_DIR, "uplift_validation.png"))
-
-    # Save a summary CSV of recommended targeting (who to send the intervention to)
-    df_eval["predicted_uplift_xlearner"] = uplift_x
-    top_targets = df_eval.sort_values("predicted_uplift_xlearner", ascending=False)
-    top_targets[["user_id", "engagement_type", "predicted_uplift_xlearner", "true_treatment_effect"]].to_csv(
+    cols = ["user_id", "engagement_type", "predicted_uplift_xlearner", "true_treatment_effect"]
+    df_eval.sort_values("predicted_uplift_xlearner", ascending=False)[cols].to_csv(
         os.path.join(OUT_DIR, "recommended_targeting.csv"), index=False
     )
-    print(f"\nSaved targeting recommendations to {OUT_DIR}/recommended_targeting.csv")
+    with open(os.path.join(OUT_DIR, "metrics.json"), "w") as f:
+        json.dump({k: {"correlation": v[0], "deciles": v[1]} for k, v in results.items()}, f, indent=2)
+    print(f"\nSaved targeting recommendations and metrics to {OUT_DIR}")
 
 
 if __name__ == "__main__":
