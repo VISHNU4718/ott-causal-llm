@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OTT retention uplift: results explorer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <h1>OTT retention uplift</h1>
+      <p class="sub">SASRec-style transformer on watch histories, then T- and X-Learner uplift models, scored against a known ground truth.</p>
+      <p class="notice"><strong>Read this first.</strong> The data is simulated, and the numbers on this page were precomputed by the pipeline in the repository and saved to <code>data.json</code>. No model runs in your browser and no LLM is used. "True effect" is known only because the data is simulated.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="overview" aria-labelledby="h-overview">
+      <h2 id="h-overview">Overview</h2>
+      <div class="cards" id="cards"></div>
+    </section>
+
+    <section aria-labelledby="h-target">
+      <h2 id="h-target">Who should get the intervention?</h2>
+      <p class="lead">Contact the top share of held-out users, ranked by predicted uplift. The chart shows the expected number of extra retained users, using each user's true effect from the simulation.</p>
+      <div class="control">
+        <label for="share">Share of held-out users contacted: <output id="share-out">30%</output></label>
+        <input id="share" type="range" min="5" max="100" step="5" value="30">
+      </div>
+      <div class="two">
+        <table id="gain-table" class="tbl"></table>
+        <figure><svg id="gain-chart" viewBox="0 0 520 300" role="img" aria-label="Expected extra retained users versus number of users contacted"></svg>
+          <figcaption>Expected extra retained users vs users contacted. Higher and further left is better.</figcaption></figure>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-decile">
+      <h2 id="h-decile">Ranking quality by decile</h2>
+      <p class="lead">Held-out users sorted by predicted uplift and split in ten groups. Bars show the mean <em>true</em> effect in each group. A good ranking falls from left to right.</p>
+      <figure><svg id="decile-chart" viewBox="0 0 760 300" role="img" aria-label="Mean true effect by predicted uplift decile"></svg></figure>
+      <table id="metric-table" class="tbl"></table>
+    </section>
+
+    <section aria-labelledby="h-seg">
+      <h2 id="h-seg">Simulated segments</h2>
+      <p class="lead">The simulation assigns each user a hidden segment. It drives both behaviour and how much the intervention helps. The models never see the segment.</p>
+      <table id="seg-table" class="tbl"></table>
+    </section>
+
+    <section aria-labelledby="h-map">
+      <h2 id="h-map">Embedding map</h2>
+      <p class="lead">t-SNE of the 128-dimensional user embeddings. Colour is the hidden segment. Hover a point for details.</p>
+      <div class="map-box">
+        <canvas id="map" width="760" height="460" aria-label="t-SNE scatter of user embeddings"></canvas>
+        <div id="map-tip" class="tip" hidden></div>
+      </div>
+      <div class="legend" id="legend"></div>
+    </section>
+
+    <section aria-labelledby="h-users">
+      <h2 id="h-users">Held-out users</h2>
+      <form id="lookup" class="inline" novalidate>
+        <label for="uid">Look up a user id</label>
+        <input id="uid" inputmode="numeric" autocomplete="off" placeholder="e.g. 3024">
+        <button type="submit">Find</button>
+        <span id="lookup-msg" class="msg" role="alert"></span>
+      </form>
+      <div class="inline">
+        <label for="seg-filter">Segment</label>
+        <select id="seg-filter"><option value="">All</option><option>dormant</option><option>casual</option><option>core</option></select>
+        <span class="muted">Sorted by X-Learner predicted uplift, highest first.</span>
+      </div>
+      <table id="user-table" class="tbl users"></table>
+      <div class="pager"><button id="prev" type="button">Previous</button><span id="page-info"></span><button id="next" type="button">Next</button></div>
+      <aside id="detail" class="detail" hidden></aside>
+    </section>
+
+    <section aria-labelledby="h-limits">
+      <h2 id="h-limits">Limits</h2>
+      <ul>
+        <li>All data is simulated. This shows that the method recovers a known effect, not how real viewers behave.</li>
+        <li>Treatment was randomised, so no propensity model is needed. Observational data would need one.</li>
+        <li id="limit-model"></li>
+      </ul>
+      <p class="muted">Source and pipeline: <a href="https://github.com/VISHNU4718/ott-causal-llm">github.com/VISHNU4718/ott-causal-llm</a></p>
+    </section>
+  </main>
+
+  <script src="lib.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

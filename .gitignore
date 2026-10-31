@@ -20,3 +20,6 @@ Thumbs.db
 *.pt
 *.pth
 *.ckpt
+
+.ruff_cache/
+.pytest_cache/
